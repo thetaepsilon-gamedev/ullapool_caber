@@ -86,8 +86,86 @@ local impulse_time = 0.1
 local time_constant = impulse_time * 0.5
 -- try not to reach absurdity.
 local impulse_clamp = 0.05
+
+
+
+
+
+
+
+-- code split below: depends on safe mode setting (safe mode ON by default)
+
+-- common to both modes
+local push_common = function(cx, cy, cz, ent, ex, ey, ez)
+	local ox, oy, oz = vsub(ex, ey, ez, cx, cy, cz)
+	local ux, uy, uz, distance = vunit(ox, oy, oz)
+
+	-- step the entity's projected motion (FIXME: acceleration!)
+	-- a certain amount of time into the future,
+	-- as in reality no explosion occurs in zero time.
+	-- the idea here is that in the case of moving towards the explosion,
+	-- the later point will recieve much more energy due to being closer.
+	-- this has the benefit of making the explosion more useful at breaking falls.
+	local r1 = 1 / (distance * distance)
+	local vx, vy, vz = unwrap(get_entity_velocity(ent))
+
+	-- work out predicted movement and end positions...
+	local prmx, prmy, prmz = vmul(impulse_time, vx, vy, vz)
+	-- re-use positions in explosion relative space to avoid recalculating.
+	local prx, pry, prz = vadd(ox, oy, oz, prmx, prmy, prmz)
+	-- then just calculate distance this time.
+	local d2 = vlensq(prx, pry, prz)
+	local r2 = 1 / d2
+
+	-- hacky hacky HACKY maths! but it should do for our purposes
+	local impulse = (r1 + r2) * time_constant
+	local i = min(impulse, impulse_clamp)
+	local recieved_power = i * explosion_power
+
+	-- plug everything back together to get effective acceleration...
+	local ax, ay, az = vmul(recieved_power, ux, uy, uz)
+	-- and PUNT!
+	accel_ent(ent, ax, ay, az)
+end
+
+-- dangerous mode: affects all nearby entities.
+local do_explode_dangerous = function(c, ...)
+	local cx, cy, cz = unwrap(c)
+
+	-- then for each entity we find (see notes about radius above)
+	-- get a) the unit vector of the entity's offset from the centre,
+	-- and b) the distance from the centre point to calculate inverse power.
+	for _, ent in ipairs(minetest.get_objects_inside_radius(c, search_radius)) do
+		local epos = ent:get_pos()
+		-- treat entity's collision centre as it's origin.
+		local ex, ey, ez = centre_of(ent, unwrap(epos))
+
+		-- call common code
+		push_common(cx, cy, cz, ent, ex, ey, ez)
+	end
+end
+
+-- safe mode: only affect the user.
+local do_explode_safe = function(c, user, ex, ey, ez)
+	local cx, cy, cz = unwrap(c)
+
+	-- we already know where the player is, so just use that.
+	return push_common(cx, cy, cz, user, ex, ey, ez)
+end
+
+local s = minetest.settings:get_bool("ullapool_caber__disable_safe_mode")
+local safemode = (s == nil) or (s == false)
+local do_explode = safemode and do_explode_safe or do_explode_dangerous
+
+
+
+
+
+
+
 -- search distance for what the caber struck.
 local reach = 16.0
+
 local on_use = function(stack, user, pointed)
 	-- get the "centre" of the player (roughly their waistline)
 	-- and cast a ray from there along the player's look direction,
@@ -110,46 +188,10 @@ local on_use = function(stack, user, pointed)
 	-- do effects of "explosion" at this location
 	explosion_fx(c)
 
-	-- just use the under block as the centre as that gets us what we want.
-	--local c = pointed.under
-	local cx, cy, cz = unwrap(c)
-
-	-- then for each entity we find (see notes about radius above)
-	-- get a) the unit vector of the entity's offset from the centre,
-	-- and b) the distance from the centre point to calculate inverse power.
-	for _, ent in ipairs(minetest.get_objects_inside_radius(c, search_radius)) do
-		local epos = ent:get_pos()
-		-- treat entity's collision centre as it's origin.
-		local ex, ey, ez = centre_of(ent, unwrap(epos))
-		local ox, oy, oz = vsub(ex, ey, ez, cx, cy, cz)
-		-- a) and b)
-		local ux, uy, uz, distance = vunit(ox, oy, oz)
-
-		-- step the entity's projected motion (FIXME: acceleration!)
-		-- a certain amount of time into the future,
-		-- as in reality no explosion occurs in zero time.
-		-- the idea here is that in the case of moving towards the explosion,
-		-- the later point will recieve much more energy due to being closer.
-		-- this has the benefit of making the explosion more useful at breaking falls.
-		local r1 = 1 / (distance * distance)
-		local vx, vy, vz = unwrap(get_entity_velocity(ent))
-		-- work out predicted movement and end positions...
-		local prmx, prmy, prmz = vmul(impulse_time, vx, vy, vz)
-		-- re-use positions in explosion relative space to avoid recalculating.
-		local prx, pry, prz = vadd(ox, oy, oz, prmx, prmy, prmz)
-		-- then just calculate distance this time.
-		local d2 = vlensq(prx, pry, prz)
-		local r2 = 1 / d2
-		-- hacky hacky HACKY maths! but it should do for our purposes
-		local impulse = (r1 + r2) * time_constant
-		local i = min(impulse, impulse_clamp)
-		local recieved_power = i * explosion_power
-
-		-- plug everything back together to get effective acceleration...
-		local ax, ay, az = vmul(recieved_power, ux, uy, uz)
-		-- and PUNT!
-		accel_ent(ent, ax, ay, az)
-	end
+	-- safe or dangerous mode dispatch.
+	-- safe mode just uses the player and their centre,
+	-- so pass that to re-use it.
+	return do_explode(c, user, px, py, pz)
 end
 
 
